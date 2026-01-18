@@ -1,7 +1,7 @@
 import time
-import requests
+import cloudscraper
 from typing import Generator, Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from ..core.models import UnifiedListing
 from ..core.zones_config import ZONES_CONFIG, OPERATION_TYPES
 from .base import BaseConnector
@@ -13,8 +13,10 @@ class ZonapropConnector(BaseConnector):
         self.current_page = 1
         self.total_pages = 0
         self.total_listings = 0
-        self.listings_per_page = 30
+        self.listings_per_page = 30  # API máximo es 30, no acepta valores mayores
         self.pagination_info = {}
+        # Create cloudscraper session that handles Cloudflare
+        self.session = cloudscraper.create_scraper()
 
     def authenticate(self):
         """Mock authentication with Cloudflare clearance"""
@@ -30,7 +32,7 @@ class ZonapropConnector(BaseConnector):
         Args:
             page: Page number to fetch (1-indexed)
             offset: Starting position for results
-            limit: Number of results per page (max 30)
+            limit: Number of results per page (API máximo: 30)
             province_code: Province code (default: "6" for Buenos Aires)
             operation_code: Operation type code ("1" for sale, "2" for rent)
             zone_code: Zone code within province (optional)
@@ -44,7 +46,7 @@ class ZonapropConnector(BaseConnector):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
             "Accept": "*/*",
             "Accept-Language": "es-AR,es;q=0.8,en-US;q=0.5,en;q=0.3",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Encoding": "gzip, deflate",
             "Referer": "https://www.zonaprop.com.ar/inmuebles-venta-capital-federal.html",
             "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
@@ -56,7 +58,6 @@ class ZonapropConnector(BaseConnector):
             "Sec-Fetch-Site": "same-origin",
             "Priority": "u=4",
             "TE": "trailers",
-            "Cookie": "cf_clearance=0QB1ynKzcR9U7GLnHmCT19Vh8UBru3bot5dCEi8CKtU-1767791822-1.2.1.1-1FrtpYO0Q6fQI5gcpqnM7BLiBOXWw0GIuJIHkwkLzrcIAiFe3tXoAWA8NYUxsWx82GrwPmoipBPTPCqVyyeomsMqitVAlfK9l27m5pVzbQkA8fhvu8MzfG9gkKALxpbx4aU0qoycW0K9EemfN.Mqg1qXoObFyZoq8.qoVsuAnLIm4p2Mk4w98uHaACodwrZSMHuV5LqtvPNp4GHo.HgfMUL_T.RZwqEJAnoDm8uaCtc; _ga_68T3PL08E4=GS1.1.1744994562.3.1.1744994565.57.0.0; _ga=GA1.1.1261800637.1744642318"
         }
         
         payload = {
@@ -119,9 +120,11 @@ class ZonapropConnector(BaseConnector):
         }
         
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response = self.session.post(url, headers=headers, json=payload, timeout=10)
             response.raise_for_status()
             
+            # Ensure proper encoding
+            response.encoding = 'utf-8'
             data = response.json()
             
             # Extract and store pagination info
@@ -133,7 +136,7 @@ class ZonapropConnector(BaseConnector):
             
             return data
             
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             print(f"[{self.platform_name}] Error fetching properties: {e}")
             return None
 
@@ -242,16 +245,19 @@ class ZonapropConnector(BaseConnector):
             
             print(f"[{self.platform_name}] Fetching page {page}...")
             
+            # Calculate offset for pagination
+            offset = (page - 1) * self.listings_per_page
+            
             # Fetch data for current page
-            data = self.get_property(page=page, limit=self.listings_per_page, 
+            data = self.get_property(page=page, limit=self.listings_per_page, offset=offset,
                                     province_code=province_code, operation_code=operation_code,
                                     zone_code=zone_code)
             
-            if not data or "postings" not in data:
+            if not data or "listPostings" not in data:
                 print(f"[{self.platform_name}] No data received or invalid response format")
                 break
             
-            postings = data.get("postings", [])
+            postings = data.get("listPostings", [])
             
             if not postings:
                 print(f"[{self.platform_name}] No postings found on page {page}")
@@ -261,7 +267,8 @@ class ZonapropConnector(BaseConnector):
             for posting in postings:
                 try:
                     # Extract property details from posting
-                    listing_id = str(posting.get("id", ""))
+                    listing_id = posting.get("id") or posting.get("publicationId") or ""
+                    listing_id = str(listing_id) if listing_id else ""
                     title = posting.get("title", "")
                     description = posting.get("description", "")
                     price = posting.get("price", 0)
@@ -289,14 +296,14 @@ class ZonapropConnector(BaseConnector):
                     updated_at_str = posting.get("updatedAt", None)
                     
                     try:
-                        source_created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")) if created_at_str else datetime.utcnow()
+                        source_created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")) if created_at_str else datetime.now(timezone.utc)
                     except (ValueError, AttributeError):
-                        source_created_at = datetime.utcnow()
+                        source_created_at = datetime.now(timezone.utc)
                     
                     try:
-                        source_updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00")) if updated_at_str else datetime.utcnow()
+                        source_updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00")) if updated_at_str else datetime.now(timezone.utc)
                     except (ValueError, AttributeError):
-                        source_updated_at = datetime.utcnow()
+                        source_updated_at = datetime.now(timezone.utc)
                     
                     # Create UnifiedListing object
                     listing = UnifiedListing(
@@ -333,5 +340,5 @@ class ZonapropConnector(BaseConnector):
             page += 1
             pages_fetched += 1
             
-            # Add delay between requests to be respectful
-            time.sleep(1)
+            # Add delay between requests to be respectful (reduced from 1s to 0.5s)
+            time.sleep(0.5)

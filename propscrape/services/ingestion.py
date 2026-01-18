@@ -5,7 +5,7 @@ Coordinates scraping of multiple Argentine zones and operation types
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
 
@@ -13,6 +13,16 @@ from ..connectors.zonaprop import ZonapropConnector
 from ..core.zones_config import ZONES_CONFIG, OPERATION_TYPES, ZONES_TO_SCRAPE, OPERATIONS_TO_SCRAPE
 from ..core.database import SessionLocal
 from ..core.models import ListingDB, IngestionRun
+from ..core.config import settings
+
+# Try to import MongoDB utilities
+try:
+    from ..core.mongo_db import listings_collection, ingestion_runs_collection
+    MONGO_AVAILABLE = True
+except Exception as e:
+    MONGO_AVAILABLE = False
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning(f"MongoDB not available: {e}. Using SQLite instead.")
 
 
 # Configure logging
@@ -30,36 +40,105 @@ logger = logging.getLogger(__name__)
 class MultiZoneScraper:
     """Orchestrates scraping across multiple zones and operation types"""
     
-    def __init__(self):
+    def __init__(self, batch_size: int = 500):
         """Initialize the multi-zone scraper"""
         self.connector = ZonapropConnector()
-        self.session = SessionLocal()
+        self.connector = ZonapropConnector()
+        # Initialize session only if using SQLite (not MongoDB)
+        if SessionLocal:
+            self.session = SessionLocal()
+        else:
+            self.session = None
+        self.batch_size = batch_size
+        self.batch_buffer = []  # Buffer for batch inserts
         self.stats = {
             "total_listings": 0,
             "total_zones_processed": 0,
             "total_operations_processed": 0,
+            "listings_new": 0,
+            "listings_updated": 0,
+            "batches_written": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None
         }
     
-    def save_listing_to_db(self, listing) -> bool:
-        """Save a listing to the database"""
+    def add_to_batch(self, listing) -> bool:
+        """Add listing to batch buffer (optimized for MongoDB)"""
         try:
             pk_id = f"{listing.platform}_{listing.platform_listing_id}"
-            data = listing.model_dump()
+            
+            # Use model_dump_with_geo() to include geo_location field
+            data = listing.model_dump_with_geo()
             data['id'] = pk_id
+            data['ingested_at'] = datetime.now(timezone.utc)
             
-            listing_db = ListingDB(**data)
-            listing_db.ingested_at = datetime.utcnow()
+            if MONGO_AVAILABLE and settings.DATABASE_TYPE == "mongodb":
+                # Add to batch buffer
+                self.batch_buffer.append(data)
+                
+                # Auto-flush when buffer is full
+                if len(self.batch_buffer) >= self.batch_size:
+                    self.flush_batch()
+            else:
+                # SQLite: immediate save (no batching)
+                listing_db = ListingDB(**data)
+                listing_db.ingested_at = datetime.now(timezone.utc)
+                self.session.merge(listing_db)
+                self.session.commit()
             
-            self.session.merge(listing_db)
-            self.session.commit()
             return True
         except Exception as e:
-            logger.error(f"Error saving listing to DB: {e}")
-            self.session.rollback()
+            logger.error(f"Error adding listing to batch: {e}")
+            if not MONGO_AVAILABLE or settings.DATABASE_TYPE == "sqlite":
+                self.session.rollback()
             return False
+    
+    def flush_batch(self) -> int:
+        """Flush batch buffer to MongoDB using bulk operations"""
+        if not self.batch_buffer:
+            return 0
+        
+        if not (MONGO_AVAILABLE and settings.DATABASE_TYPE == "mongodb"):
+            return 0
+        
+        try:
+            from pymongo import UpdateOne
+            
+            # Prepare bulk operations
+            operations = []
+            for data in self.batch_buffer:
+                operations.append(
+                    UpdateOne(
+                        {
+                            "platform": data["platform"],
+                            "platform_listing_id": data["platform_listing_id"]
+                        },
+                        {"$set": data},
+                        upsert=True
+                    )
+                )
+            
+            # Execute bulk write
+            result = listings_collection.bulk_write(operations, ordered=False)
+            
+            # Update statistics
+            self.stats["listings_new"] += result.upserted_count
+            self.stats["listings_updated"] += result.modified_count
+            self.stats["batches_written"] += 1
+            
+            count = len(self.batch_buffer)
+            logger.info(f"  [BATCH] Flushed {count} listings (New: {result.upserted_count}, Updated: {result.modified_count})")
+            
+            # Clear buffer
+            self.batch_buffer.clear()
+            
+            return count
+            
+        except Exception as e:
+            logger.error(f"Error flushing batch: {e}")
+            # Don't clear buffer on error - will retry
+            return 0
     
     def scrape_zone_operation(self, zone_key: str, operation_key: str, 
                              max_pages: Optional[int] = None, save_to_db: bool = True) -> int:
@@ -95,17 +174,22 @@ class MultiZoneScraper:
             for listing in self.connector.fetch_listings_for_zone(zone_key, operation_key, max_pages):
                 try:
                     if save_to_db:
-                        self.save_listing_to_db(listing)
+                        self.add_to_batch(listing)  # Use batch instead of individual save
                     
                     listings_count += 1
                     
-                    if listings_count % 10 == 0:
-                        logger.info(f"  ✓ Processed {listings_count} listings")
+                    # Report progress every 100 listings (less frequent with batching)
+                    if listings_count % 100 == 0:
+                        logger.info(f"  [OK] Processed {listings_count} listings (buffer: {len(self.batch_buffer)})")
                 
                 except Exception as e:
                     logger.error(f"Error processing listing: {e}")
                     self.stats["errors"] += 1
                     continue
+            
+            # Flush remaining listings after zone completion
+            if save_to_db:
+                self.flush_batch()
             
             logger.info(f"Completed: {zone_config['display_name']} - {operation_config['display_name']} ({listings_count} listings)")
             self.stats["total_listings"] += listings_count
@@ -137,7 +221,7 @@ class MultiZoneScraper:
         zones = zones or ZONES_TO_SCRAPE
         operations = operations or OPERATIONS_TO_SCRAPE
         
-        self.stats["start_time"] = datetime.utcnow()
+        self.stats["start_time"] = datetime.now(timezone.utc)
         
         logger.info("="*80)
         logger.info(f"Starting multi-zone scraping at {self.stats['start_time']}")
@@ -164,7 +248,11 @@ class MultiZoneScraper:
                 
                 self.stats["total_zones_processed"] += 1
         
-        self.stats["end_time"] = datetime.utcnow()
+        # Final flush to save any remaining listings in buffer
+        logger.info("\nFlushing remaining listings from buffer...")
+        self.flush_batch()
+        
+        self.stats["end_time"] = datetime.now(timezone.utc)
         duration = (self.stats["end_time"] - self.stats["start_time"]).total_seconds() / 60
         
         logger.info("\n" + "="*80)
@@ -172,6 +260,9 @@ class MultiZoneScraper:
         logger.info("="*80)
         logger.info(f"Total listings scraped: {self.stats['total_listings']}")
         logger.info(f"Total zone-operation combinations processed: {self.stats['total_operations_processed']}")
+        logger.info(f"Listings inserted (new): {self.stats['listings_new']}")
+        logger.info(f"Listings updated (existing): {self.stats['listings_updated']}")
+        logger.info(f"Batches written: {self.stats['batches_written']} (batch size: {self.batch_size})")
         logger.info(f"Errors encountered: {self.stats['errors']}")
         logger.info(f"Duration: {duration:.2f} minutes")
         if duration > 0:
@@ -202,8 +293,15 @@ class MultiZoneScraper:
         )
     
     def close(self):
-        """Close database session"""
-        self.session.close()
+        """Close database session and flush any remaining batch data"""
+        # Flush any remaining data in buffer
+        if self.batch_buffer:
+            logger.info("Flushing remaining batch data on close...")
+            self.flush_batch()
+        
+        # Close session if it exists
+        if self.session:
+            self.session.close()
 
 
 def main():

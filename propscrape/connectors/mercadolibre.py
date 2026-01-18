@@ -1,7 +1,7 @@
 import time
 import random
 from typing import Generator
-from datetime import datetime
+from datetime import datetime, timezone
 from ..core.models import UnifiedListing
 from .base import BaseConnector
 
@@ -34,8 +34,8 @@ class MercadoLibreConnector(BaseConnector):
                 surface_total=random.randint(30, 150),
                 rooms=random.randint(1, 4),
                 status="active",
-                source_created_at=datetime.utcnow(),
-                source_updated_at=datetime.utcnow(),
+                source_created_at=datetime.now(timezone.utc),
+                source_updated_at=datetime.now(timezone.utc),
                 title=f"Meli Mock Prop {i+1}",
                 description="Another mock listing from MercadoLibre."
             )

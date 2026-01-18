@@ -5,8 +5,17 @@ Multi-zone real estate scraper for creating a property data lake
 """
 
 import sys
+import os
 import argparse
-from services.ingestion import MultiZoneScraper, ZONES_CONFIG, OPERATION_TYPES
+
+# Add parent directory to path to allow propscrape package imports when run directly
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from propscrape.services.ingestion import MultiZoneScraper, ZONES_CONFIG, OPERATION_TYPES
+from propscrape.core.database import init_db
+
+# Initialize database tables
+init_db()
 
 def main():
     parser = argparse.ArgumentParser(
@@ -106,13 +115,13 @@ Examples:
     
     try:
         if args.test:
-            print("🚀 Starting quick test scrape...")
+            print("[>] Starting quick test scrape...")
             stats = scraper.scrape_capital_federal_only(max_pages=args.max_pages or 5)
         else:
             zones = args.zones or list(ZONES_CONFIG.keys())
             operations = args.operations or list(OPERATION_TYPES.keys())
             
-            print(f"🚀 Starting scrape of {len(zones) * len(operations)} zone-operation combinations...")
+            print(f"[>] Starting scrape of {len(zones) * len(operations)} zone-operation combinations...")
             stats = scraper.scrape_all_zones_operations(
                 zones=zones,
                 operations=operations,
@@ -120,7 +129,7 @@ Examples:
                 save_to_db=not args.no_db
             )
         
-        print("\n✅ Scraping completed successfully!")
+        print("\n[OK] Scraping completed successfully!")
         print(f"\nResults:")
         print(f"  Total listings: {stats['total_listings']}")
         print(f"  Combinations processed: {stats['total_operations_processed']}")
@@ -130,11 +139,11 @@ Examples:
         return 0
     
     except KeyboardInterrupt:
-        print("\n\n⚠️  Scraping interrupted by user")
+        print("\n\n[!] Scraping interrupted by user")
         scraper.close()
         return 1
     except Exception as e:
-        print(f"\n\n❌ Fatal error: {e}")
+        print(f"\n\n[ERROR] Fatal error: {e}")
         import traceback
         traceback.print_exc()
         scraper.close()
