@@ -266,44 +266,103 @@ class ZonapropConnector(BaseConnector):
             # Transform each posting to UnifiedListing
             for posting in postings:
                 try:
-                    # Extract property details from posting
-                    listing_id = posting.get("id") or posting.get("publicationId") or ""
+                    # 1. Basic IDs
+                    listing_id = posting.get("postingId") or posting.get("id") or ""
                     listing_id = str(listing_id) if listing_id else ""
+
+                    if not listing_id:
+                        continue
+                    
+                    # 2. URLs
+                    url_path = posting.get("url", "")
+                    listing_url = f"https://www.zonaprop.com.ar{url_path}" if url_path.startswith("/") else url_path
+                    
+                    # 3. Titles and Descriptions
                     title = posting.get("title", "")
-                    description = posting.get("description", "")
-                    price = posting.get("price", 0)
-                    currency = posting.get("currency", "ARS")
+                    description = posting.get("descriptionNormalized") or posting.get("description", "")
                     
-                    # Location info
-                    address_text = posting.get("address", "")
-                    address_data = posting.get("addressData", {})
-                    geo_lat = address_data.get("latitude", None)
-                    geo_lng = address_data.get("longitude", None)
+                    # 4. Operations and Prices
+                    op_types = posting.get("priceOperationTypes", [])
+                    operation_type = "sale"  # Default
+                    price = 0.0
+                    currency = "USD"
                     
-                    # Property details
-                    property_type = posting.get("type", "unknown")
-                    rooms = posting.get("rooms", None)
-                    surface_total = posting.get("surface", None)
+                    if op_types and len(op_types) > 0:
+                        op_data = op_types[0]
+                        op_name = op_data.get("operationType", {}).get("name", "Venta").lower()
+                        if "alquiler" in op_name:
+                            operation_type = "rent"
+                        
+                        prices = op_data.get("prices", [])
+                        if prices:
+                            price = float(prices[0].get("amount", 0))
+                            currency = prices[0].get("currency", "USD")
+
+                    # 5. Expenses
+                    expenses_data = posting.get("expenses", {})
+                    expenses = None
+                    if expenses_data and isinstance(expenses_data, dict):
+                        exp_amount = expenses_data.get("amount")
+                        if exp_amount:
+                            expenses = float(exp_amount)
+                        
+                    # 6. Location
+                    location_data = posting.get("postingLocation", {})
+                    address_data = location_data.get("address", {})
+                    address_text = address_data.get("name", "")
                     
-                    # Operation type (sale/rent) - inferred from API data
-                    operation_type = posting.get("operationType", "sale").lower()
+                    geo_data = location_data.get("postingGeolocation", {}).get("geolocation", {})
+                    geo_lat = geo_data.get("latitude")
+                    geo_lng = geo_data.get("longitude")
                     
-                    # URLs
-                    listing_url = posting.get("url", f"https://www.zonaprop.com.ar/propiedades/{listing_id}")
+                    # 7. Features (Surface, Rooms, etc.)
+                    main_features = posting.get("mainFeatures", {})
                     
-                    # Timestamps
-                    created_at_str = posting.get("publishedAt", None)
-                    updated_at_str = posting.get("updatedAt", None)
+                    def get_feature_value(key):
+                        feat = main_features.get(key, {})
+                        val = feat.get("value")
+                        if val and str(val).replace(".", "").isdigit():
+                            return float(val)
+                        return None
+
+                    # Zonaprop keys: CFT100=Total, CFT101=Covered, CFT1=Ambientes, CFT2=Dormitorios, CFT3=Baños
+                    surface_total = get_feature_value("CFT100")
+                    surface_covered = get_feature_value("CFT101")
+                    rooms = int(get_feature_value("CFT1")) if get_feature_value("CFT1") else None
+                    bedrooms = int(get_feature_value("CFT2")) if get_feature_value("CFT2") else None
+                    bathrooms = int(get_feature_value("CFT3")) if get_feature_value("CFT3") else None
+
+                    # 8. Images
+                    visible_pics = posting.get("visiblePictures", {}).get("pictures", [])
+                    images = []
+                    for pic in visible_pics:
+                        url = pic.get("url730x532") or pic.get("url360x266")
+                        if url:
+                            images.append(url)
+                            
+                    # 9. Publisher
+                    publisher = posting.get("publisher", {})
+                    agent = publisher.get("name") if publisher else None
                     
-                    try:
-                        source_created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")) if created_at_str else datetime.now(timezone.utc)
-                    except (ValueError, AttributeError):
-                        source_created_at = datetime.now(timezone.utc)
+                    # 10. Property Type
+                    prop_type_data = posting.get("realEstateType", {})
+                    property_type = prop_type_data.get("name", "unknown") if prop_type_data else "unknown"
                     
-                    try:
-                        source_updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00")) if updated_at_str else datetime.now(timezone.utc)
-                    except (ValueError, AttributeError):
-                        source_updated_at = datetime.now(timezone.utc)
+                    # 11. Timestamps
+                    source_created_at = datetime.now(timezone.utc)
+                    source_updated_at = None
+                    modified_date_str = posting.get("modified_date")
+                    if modified_date_str:
+                        try:
+                            # Format: 2026-01-20T11:49:39-0500
+                            source_updated_at = datetime.fromisoformat(modified_date_str.replace("-0500", "-05:00").replace("-0300", "-03:00"))
+                        except (ValueError, AttributeError):
+                            pass
+
+                    # Validate coordinates
+                    if (geo_lat is None) != (geo_lng is None):
+                        geo_lat = None
+                        geo_lng = None
                     
                     # Create UnifiedListing object
                     listing = UnifiedListing(
@@ -312,18 +371,24 @@ class ZonapropConnector(BaseConnector):
                         listing_url=listing_url,
                         operation_type=operation_type,
                         property_type=property_type,
-                        price=float(price) if price else None,
                         currency=currency,
+                        price=price,
+                        expenses=expenses,
+                        status="active",
                         address_text=address_text,
                         geo_lat=geo_lat,
                         geo_lng=geo_lng,
-                        surface_total=float(surface_total) if surface_total else None,
+                        surface_total=surface_total,
+                        surface_covered=surface_covered,
                         rooms=rooms,
-                        status="active",
-                        source_created_at=source_created_at,
-                        source_updated_at=source_updated_at,
+                        bedrooms=bedrooms,
+                        bathrooms=bathrooms,
                         title=title,
-                        description=description
+                        description=description,
+                        images=images,
+                        agent_publisher=agent,
+                        source_created_at=source_created_at,
+                        source_updated_at=source_updated_at
                     )
                     
                     yield listing

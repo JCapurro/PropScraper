@@ -2,19 +2,15 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug main.py --test",
-            "type": "python",
+            "name": "Debug run_scraping.py ",
+            "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/propscrape/main.py",
-            "args": ["--test"],
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "cwd": "${workspaceFolder}",
-            "pythonPath": "${workspaceFolder}/.venv/bin/python.exe",
-            "env": {
-                "VIRTUAL_ENV": "${workspaceFolder}/.venv",
-                "PATH": "${workspaceFolder}/.venv/bin;${env:PATH}"
-            }
+            "program": "${workspaceFolder}/run_scraping.py",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "args": [
+                "--zones",
+                "capital_federal"
+            ]
         }
-        ]
+    ]
 }

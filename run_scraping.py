@@ -10,6 +10,14 @@ import os
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
+# Force UTF-8 output for Windows
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
+
 from propscrape.services.ingestion import MultiZoneScraper
 import argparse
 import logging
@@ -48,6 +56,20 @@ def main():
     print(f"  Collection: DataLake")
     print("\n" + "=" * 80 + "\n")
     
+    # Check simple connection before starting
+    try:
+        from propscrape.core.config import settings
+        if settings.DATABASE_TYPE == "mongodb":
+            from pymongo import MongoClient
+            client = MongoClient(settings.DATABASE_URL, serverSelectionTimeoutMS=2000)
+            client.admin.command('ping')
+            print(f"✓ MongoDB connection successful: {settings.DATABASE_URL}\n")
+            client.close()
+    except Exception as e:
+        print(f"⚠ WARNING: Could not connect to MongoDB: {e}")
+        print("  Scraping will proceed but data might not be saved properly if using MongoDB!\n")
+
+    
     # Create scraper with batch optimization
     scraper = MultiZoneScraper(batch_size=args.batch_size)
     
@@ -67,9 +89,32 @@ def main():
             save_to_db=True
         )
         
-        print("\n✓ SCRAPING COMPLETADO EXITOSAMENTE")
-        print(f"\nLos datos están en: RealStates.DataLake")
-        print(f"Puedes verificar con MongoDB Compass: mongodb://localhost:27017/\n")
+        print("\n" + "=" * 80)
+        print("SCRAPING SUMMARY")
+        print("=" * 80)
+        
+        # Stats are returned as a dictionary
+        if stats:
+            print(f"Total listings processed: {stats.get('total_listings', 0)}")
+            print(f"Listings inserted (new): {stats.get('listings_new', 0)}")
+            print(f"Listings updated: {stats.get('listings_updated', 0)}")
+            print(f"Errors: {stats.get('errors', 0)}")
+            print("-" * 80)
+            
+            if stats.get('listings_new', 0) == 0 and stats.get('listings_updated', 0) == 0:
+                print("\n⚠ WARNING: No listings were saved to the database!")
+                print("  Possible reasons:")
+                print("  1. No listings were found in the requested zones/operations")
+                print("  2. Database connection failed (check logs)")
+                print("  3. All listings were already up to date (if running frequently)")
+            else:
+                print(f"\n✓ Data successfully saved to: RealStates.DataLake")
+                print(f"  Verify with MongoDB Compass: mongodb://localhost:27017/")
+        else:
+            print("\n⚠ No statistics returned from scraper.")
+            
+        print("\n" + "=" * 80 + "\n")
+
         
         return 0
         
