@@ -297,14 +297,22 @@ class ZonapropConnector(BaseConnector):
                         if prices:
                             price = float(prices[0].get("amount", 0))
                             currency = prices[0].get("currency", "USD")
+                            # Normalize currency: if $ then ARS
+                            if currency == "$":
+                                currency = "ARS"
 
                     # 5. Expenses
                     expenses_data = posting.get("expenses", {})
                     expenses = None
+                    expenses_currency = None
                     if expenses_data and isinstance(expenses_data, dict):
                         exp_amount = expenses_data.get("amount")
                         if exp_amount:
                             expenses = float(exp_amount)
+                        
+                        exp_curr = expenses_data.get("currency")
+                        if exp_curr:
+                            expenses_currency = "ARS" if exp_curr == "$" else exp_curr
                         
                     # 6. Location
                     location_data = posting.get("postingLocation", {})
@@ -374,6 +382,7 @@ class ZonapropConnector(BaseConnector):
                         currency=currency,
                         price=price,
                         expenses=expenses,
+                        expenses_currency=expenses_currency,
                         status="active",
                         address_text=address_text,
                         geo_lat=geo_lat,

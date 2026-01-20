@@ -27,6 +27,10 @@ class UnifiedListing(BaseModel):
     # Pricing
     price: Optional[float] = Field(default=None, ge=0, description="Listing price (non-negative)")
     expenses: Optional[float] = Field(default=None, ge=0, description="Monthly expenses")
+    expenses_currency: Optional[Literal["ARS", "USD", "EUR"]] = Field(
+        default=None,
+        description="Currency code for expenses"
+    )
     
     # Location
     address_text: Optional[str] = Field(default=None, description="Text address")
@@ -113,6 +117,7 @@ class ListingDB(Base):
     price = Column(Float, nullable=True)
     currency = Column(String, nullable=False)
     expenses = Column(Float, nullable=True)
+    expenses_currency = Column(String, nullable=True)
     
     address_text = Column(String, nullable=True)
     geo_lat = Column(Float, nullable=True)
